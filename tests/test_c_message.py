@@ -8,10 +8,7 @@ import os
 import sys
 import pytest
 
-root_path = os.path.realpath('.')
-sys.path.append(root_path)
-
-from uamqp import c_uamqp
+from uamqp import c_uamqp, utils
 
 
 def test_message():
@@ -41,15 +38,32 @@ def test_body_value():
     assert body.type == c_uamqp.AMQPType.StringValue
 
 
-def test_body_sequence():
+def test_delivery_tag():
     message = c_uamqp.create_message()
-    message.add_body_sequence(c_uamqp.int_value(1))
-    message.add_body_sequence(c_uamqp.int_value(2))
-    message.add_body_sequence(c_uamqp.int_value(3))
+    assert not message.delivery_tag
 
-    assert message.count_body_sequence() == 3
-    assert message.body_type == c_uamqp.MessageBodyType.SequenceType
 
-    seq_value = message.get_body_sequence(2)
-    assert seq_value.type == c_uamqp.AMQPType.IntValue
-    assert seq_value.value == 3
+def test_message_properties():
+
+    value = c_uamqp.create_properties()
+    assert not value.user_id
+
+    value = c_uamqp.create_properties()
+    value.user_id = utils.data_factory(bytearray(b'testuseridlongstring'))
+    assert value.user_id == b'testuseridlongstring'
+
+    value = c_uamqp.create_properties()
+    value.user_id = utils.data_factory(bytearray(b''))
+    assert value.user_id == b''
+
+    value = c_uamqp.create_properties()
+    value.user_id = utils.data_factory(bytearray(b'short'))
+    assert value.user_id == b'short'
+
+    value = c_uamqp.create_properties()
+    value.user_id = utils.data_factory(bytearray(b'!@#$%^&*()+_?'))
+    assert value.user_id == b'!@#$%^&*()+_?'
+
+    value = c_uamqp.create_properties()
+    value.user_id = utils.data_factory(bytearray(b'\nweird\0user\1id\0\t'))
+    assert value.user_id == b'\nweird\0user\1id\0\t'

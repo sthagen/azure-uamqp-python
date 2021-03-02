@@ -6,6 +6,7 @@
 
 # Python imports
 import logging
+import copy
 
 # C imports
 cimport c_amqp_definitions
@@ -20,6 +21,12 @@ cpdef create_target():
     return target
 
 
+cdef target_factory(c_amqp_definitions.TARGET_HANDLE c_target):
+    target = cTarget()
+    target.wrap(c_target)
+    return target
+
+
 cdef class cTarget(StructBase):
 
     cdef c_amqp_definitions.TARGET_HANDLE _c_value
@@ -29,7 +36,7 @@ cdef class cTarget(StructBase):
         self._validate()
 
     def __dealloc__(self):
-        _logger.debug("Deallocating {}".format(self.__class__.__name__))
+        _logger.debug("Deallocating cTarget")
         self.destroy()
 
     cdef _validate(self):
@@ -38,7 +45,7 @@ cdef class cTarget(StructBase):
 
     cpdef destroy(self):
         if <void*>self._c_value is not NULL:
-            _logger.debug("Destroying {}".format(self.__class__.__name__))
+            _logger.debug("Destroying cTarget")
             c_amqp_definitions.target_destroy(self._c_value)
             self._c_value = <c_amqp_definitions.TARGET_HANDLE>NULL
 
@@ -62,7 +69,7 @@ cdef class cTarget(StructBase):
             self._value_error("Failed to get target address")
         if <void*>_value == NULL:
             return None
-        return _value.value
+        return value_factory(_value).value
 
     @address.setter
     def address(self, AMQPValue value):

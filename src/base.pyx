@@ -15,7 +15,7 @@ cimport c_utils
 _logger = logging.getLogger(__name__)
 
 
-cdef class StructBase:
+cdef class StructBase(object):
     """Base class for wrapped C structs."""
 
     def _memory_error(self):
@@ -23,15 +23,12 @@ cdef class StructBase:
         raise MemoryError(message.format(self.__class__.__name__))
 
     def _value_error(self, error_message=None, error_code=None):
-        message = (
-            "{} operation returned error status.\n"
-            "This is either because of NULL inputs or incorrect data type.")
-        message = message.format(self.__class__.__name__)
+        message = "Operation failed."
         if error_message:
             message += "\nError: {}".format(error_message)
         if error_code:
             message += "\nErrorCode: {}".format(error_code)
-        raise ValueError()
+        raise ValueError(message)
 
     def _null_error(self, error_message=None):
         message = "NULL error occurred in {}.".format(self.__class__.__name__)
@@ -40,7 +37,7 @@ cdef class StructBase:
         raise ValueError(message)
 
 
-cdef class TickCounter:
+cdef class TickCounter(object):
 
     cdef c_utils.TICK_COUNTER_HANDLE _c_value
 

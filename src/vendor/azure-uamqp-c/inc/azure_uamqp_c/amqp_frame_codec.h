@@ -14,7 +14,7 @@ extern "C" {
 #endif /* __cplusplus */
 #include "azure_uamqp_c/frame_codec.h"
 
-#include "azure_c_shared_utility/umock_c_prod.h"
+#include "umock_c/umock_c_prod.h"
 
 #define AMQP_OPEN               (uint64_t)0x10
 #define AMQP_BEGIN              (uint64_t)0x11
@@ -26,7 +26,7 @@ extern "C" {
 #define AMQP_END                (uint64_t)0x17
 #define AMQP_CLOSE              (uint64_t)0x18
 
-typedef struct AMQP_FRAME_CODEC_INSTANCE_TAG* AMQP_FRAME_CODEC_HANDLE;
+typedef struct AMQP_FRAME_CODEC_TAG* AMQP_FRAME_CODEC_HANDLE;
 typedef void(*AMQP_EMPTY_FRAME_RECEIVED_CALLBACK)(void* context, uint16_t channel);
 typedef void(*AMQP_FRAME_RECEIVED_CALLBACK)(void* context, uint16_t channel, AMQP_VALUE performative, const unsigned char* payload_bytes, uint32_t frame_payload_size);
 typedef void(*AMQP_FRAME_CODEC_ERROR_CALLBACK)(void* context);

@@ -11,7 +11,7 @@
 #include "azure_c_shared_utility/platform.h"
 #include "azure_c_shared_utility/strings.h"
 #include "azure_c_shared_utility/buffer_.h"
-#include "azure_c_shared_utility/base64.h"
+#include "azure_c_shared_utility/azure_base64.h"
 #include "azure_c_shared_utility/urlencode.h"
 #include "azure_c_shared_utility/sastoken.h"
 #include "azure_c_shared_utility/tlsio.h"
@@ -62,10 +62,11 @@ static void on_cbs_put_token_complete(void* context, CBS_OPERATION_RESULT cbs_op
     }
 }
 
-static void on_message_send_complete(void* context, MESSAGE_SEND_RESULT send_result)
+static void on_message_send_complete(void* context, MESSAGE_SEND_RESULT send_result, AMQP_VALUE delivery_state)
 {
     (void)send_result;
     (void)context;
+    (void)delivery_state;
 
     sent_messages++;
 }
@@ -134,7 +135,7 @@ int main(int argc, char** argv)
 
         /* unfortunately SASToken wants an encoded key - this should be fixed at a later time */
         buffer = BUFFER_create((unsigned char*)EH_KEY, strlen(EH_KEY));
-        sas_key_value = Base64_Encoder(buffer);
+        sas_key_value = Azure_Base64_Encode(buffer);
         BUFFER_delete(buffer);
         resource_uri = STRING_construct("sb://" EH_HOST "/" EH_NAME "/publishers/" EH_PUBLISHER);
         encoded_resource_uri = URL_EncodeString(STRING_c_str(resource_uri));
@@ -244,6 +245,8 @@ int main(int argc, char** argv)
                     }
                 }
             }
+
+            tickcounter_destroy(tick_counter);
         }
 
         cbs_destroy(cbs);

@@ -9,15 +9,22 @@
 #include <stddef.h>
 #include <stdbool.h>
 #endif
+
+#include "azure_macro_utils/macro_utils.h"
 #include "testrunnerswitcher.h"
-#include "umock_c.h"
-#include "umocktypes_charptr.h"
-#include "umocktypes_bool.h"
-#include "umock_c_negative_tests.h"
+#include "umock_c/umock_c.h"
+#include "umock_c/umocktypes_charptr.h"
+#include "umock_c/umocktypes_bool.h"
+#include "umock_c/umock_c_negative_tests.h"
 
 static void* my_gballoc_malloc(size_t size)
 {
     return malloc(size);
+}
+
+static void* my_gballoc_calloc(size_t nmemb, size_t size)
+{
+    return calloc(nmemb, size);
 }
 
 static void* my_gballoc_realloc(void* ptr, size_t size)
@@ -43,7 +50,6 @@ static void my_gballoc_free(void* ptr)
 #include "azure_uamqp_c/cbs.h"
 
 static TEST_MUTEX_HANDLE g_testByTest;
-static TEST_MUTEX_HANDLE g_dllByDll;
 
 static SESSION_HANDLE test_session_handle = (SESSION_HANDLE)0x4242;
 static AMQP_MANAGEMENT_HANDLE test_amqp_management_handle = (AMQP_MANAGEMENT_HANDLE)0x4243;
@@ -170,7 +176,7 @@ static LIST_ITEM_HANDLE my_singlylinkedlist_find(SINGLYLINKEDLIST_HANDLE handle,
     return (LIST_ITEM_HANDLE)found_item;
 }
 
-DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
+MU_DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
 TEST_DEFINE_ENUM_TYPE(CBS_OPEN_COMPLETE_RESULT, CBS_OPEN_COMPLETE_RESULT_VALUES);
 IMPLEMENT_UMOCK_C_ENUM_TYPE(CBS_OPEN_COMPLETE_RESULT, CBS_OPEN_COMPLETE_RESULT_VALUES);
 TEST_DEFINE_ENUM_TYPE(CBS_OPERATION_RESULT, CBS_OPERATION_RESULT_VALUES);
@@ -178,9 +184,7 @@ IMPLEMENT_UMOCK_C_ENUM_TYPE(CBS_OPERATION_RESULT, CBS_OPERATION_RESULT_VALUES);
 
 static void on_umock_c_error(UMOCK_C_ERROR_CODE error_code)
 {
-    char temp_str[256];
-    (void)snprintf(temp_str, sizeof(temp_str), "umock_c reported error :%s", ENUM_TO_STRING(UMOCK_C_ERROR_CODE, error_code));
-    ASSERT_FAIL(temp_str);
+    ASSERT_FAIL("umock_c reported error :%" PRI_MU_ENUM "", MU_ENUM_VALUE(UMOCK_C_ERROR_CODE, error_code));
 }
 
 BEGIN_TEST_SUITE(cbs_ut)
@@ -189,7 +193,6 @@ TEST_SUITE_INITIALIZE(suite_init)
 {
     int result;
 
-    TEST_INITIALIZE_MEMORY_DEBUG(g_dllByDll);
     g_testByTest = TEST_MUTEX_CREATE();
     ASSERT_IS_NOT_NULL(g_testByTest);
 
@@ -202,6 +205,7 @@ TEST_SUITE_INITIALIZE(suite_init)
     ASSERT_ARE_EQUAL(int, 0, result);
 
     REGISTER_GLOBAL_MOCK_HOOK(gballoc_malloc, my_gballoc_malloc);
+    REGISTER_GLOBAL_MOCK_HOOK(gballoc_calloc, my_gballoc_calloc);
     REGISTER_GLOBAL_MOCK_HOOK(gballoc_free, my_gballoc_free);
     REGISTER_GLOBAL_MOCK_HOOK(amqp_management_create, my_amqp_management_create);
     REGISTER_GLOBAL_MOCK_HOOK(amqp_management_open_async, my_amqp_management_open_async);
@@ -221,7 +225,7 @@ TEST_SUITE_INITIALIZE(suite_init)
     REGISTER_UMOCKC_PAIRED_CREATE_DESTROY_CALLS(amqp_management_create, amqp_management_destroy);
     REGISTER_UMOCKC_PAIRED_CREATE_DESTROY_CALLS(message_create, message_destroy);
     REGISTER_UMOCKC_PAIRED_CREATE_DESTROY_CALLS(properties_create, properties_destroy);
-    
+
     REGISTER_UMOCK_ALIAS_TYPE(CBS_HANDLE, void*);
     REGISTER_UMOCK_ALIAS_TYPE(SESSION_HANDLE, void*);
     REGISTER_UMOCK_ALIAS_TYPE(AMQP_MANAGEMENT_HANDLE, void*);
@@ -239,7 +243,6 @@ TEST_SUITE_CLEANUP(suite_cleanup)
     umock_c_deinit();
 
     TEST_MUTEX_DESTROY(g_testByTest);
-    TEST_DEINITIALIZE_MEMORY_DEBUG(g_dllByDll);
 }
 
 TEST_FUNCTION_INITIALIZE(test_init)
@@ -270,7 +273,7 @@ TEST_FUNCTION(cbs_create_returns_a_valid_handle)
 {
     // arrange
     CBS_HANDLE cbs;
-    STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG));
+    STRICT_EXPECTED_CALL(gballoc_calloc(IGNORED_NUM_ARG, IGNORED_NUM_ARG));
     STRICT_EXPECTED_CALL(singlylinkedlist_create());
     STRICT_EXPECTED_CALL(amqp_management_create(test_session_handle, "$cbs"));
     STRICT_EXPECTED_CALL(amqp_management_set_override_status_code_key_name(test_amqp_management_handle, "status-code"));
@@ -313,7 +316,7 @@ TEST_FUNCTION(when_one_of_the_functions_called_by_cbs_create_fails_then_cbs_crea
     size_t index;
     ASSERT_ARE_EQUAL(int, 0, negativeTestsInitResult);
 
-    STRICT_EXPECTED_CALL(gballoc_malloc(IGNORED_NUM_ARG))
+    STRICT_EXPECTED_CALL(gballoc_calloc(IGNORED_NUM_ARG, IGNORED_NUM_ARG))
         .SetFailReturn(NULL);
     STRICT_EXPECTED_CALL(singlylinkedlist_create())
         .SetReturn(NULL);
@@ -339,7 +342,7 @@ TEST_FUNCTION(when_one_of_the_functions_called_by_cbs_create_fails_then_cbs_crea
         cbs = cbs_create(test_session_handle);
 
         // assert
-        ASSERT_IS_NULL_WITH_MSG(cbs, tmp_msg);
+        ASSERT_IS_NULL(cbs, tmp_msg);
     }
 
     // cleanup
@@ -1079,7 +1082,7 @@ TEST_FUNCTION(when_any_underlying_call_fails_cbs_put_token_async_fails)
         result = cbs_put_token_async(cbs, "some_type", "my_audience", "blah_token", test_on_cbs_put_token_complete, NULL);
 
         // assert
-        ASSERT_ARE_NOT_EQUAL_WITH_MSG(int, 0, result, tmp_msg);
+        ASSERT_ARE_NOT_EQUAL(int, 0, result, tmp_msg);
     }
 
     // cleanup
@@ -1406,7 +1409,7 @@ TEST_FUNCTION(when_any_underlying_call_fails_cbs_delete_token_async_fails)
         result = cbs_delete_token_async(cbs, "some_type", "my_audience", test_on_cbs_put_token_complete, NULL);
 
         // assert
-        ASSERT_ARE_NOT_EQUAL_WITH_MSG(int, 0, result, tmp_msg);
+        ASSERT_ARE_NOT_EQUAL(int, 0, result, tmp_msg);
     }
 
     // cleanup

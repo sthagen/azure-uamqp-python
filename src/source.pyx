@@ -6,6 +6,7 @@
 
 # Python imports
 import logging
+import copy
 
 # C imports
 cimport c_amqp_definitions
@@ -20,6 +21,12 @@ cpdef create_source():
     return source
 
 
+cdef source_factory(c_amqp_definitions.SOURCE_HANDLE c_source):
+    source = cSource()
+    source.wrap(c_source)
+    return source
+
+
 cdef class cSource(StructBase):
 
     cdef c_amqp_definitions.SOURCE_HANDLE _c_value
@@ -29,7 +36,7 @@ cdef class cSource(StructBase):
         self._validate()
 
     def __dealloc__(self):
-        _logger.debug("Deallocating {}".format(self.__class__.__name__))
+        _logger.debug("Deallocating cSource")
         self.destroy()
 
     cdef _validate(self):
@@ -38,7 +45,7 @@ cdef class cSource(StructBase):
 
     cpdef destroy(self):
         if <void*>self._c_value is not NULL:
-            _logger.debug("Destroying {}".format(self.__class__.__name__))
+            _logger.debug("Destroying cSource")
             c_amqp_definitions.source_destroy(self._c_value)
             self._c_value = <c_amqp_definitions.SOURCE_HANDLE>NULL
 
@@ -62,11 +69,10 @@ cdef class cSource(StructBase):
             self._value_error("Failed to get source address")
         if <void*>_value == NULL:
             return None
-        return _value.value
+        return value_factory(_value).value
 
     @address.setter
     def address(self, AMQPValue value):
-        cdef c_amqpvalue.AMQP_VALUE c_address
         if c_amqp_definitions.source_set_address(self._c_value, <c_amqpvalue.AMQP_VALUE>value._c_value) != 0:
             self._value_error("Failed to set source address")
 

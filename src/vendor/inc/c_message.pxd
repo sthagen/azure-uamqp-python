@@ -17,7 +17,7 @@ cdef extern from "azure_uamqp_c/messaging.h":
 
     c_amqpvalue.AMQP_VALUE messaging_delivery_received(stdint.uint32_t section_number, stdint.uint64_t section_offset) nogil
     c_amqpvalue.AMQP_VALUE messaging_delivery_accepted() nogil
-    c_amqpvalue.AMQP_VALUE messaging_delivery_rejected(const char* error_condition, const char* error_description) nogil
+    c_amqpvalue.AMQP_VALUE messaging_delivery_rejected(const char* error_condition, const char* error_description, c_amqp_definitions.fields error_info) nogil
     c_amqpvalue.AMQP_VALUE messaging_delivery_released() nogil
     c_amqpvalue.AMQP_VALUE messaging_delivery_modified(bint delivery_failed, bint undeliverable_here, c_amqp_definitions.fields message_annotations) nogil
 
@@ -69,5 +69,7 @@ cdef extern from "azure_uamqp_c/message.h":
     int message_get_body_type(MESSAGE_HANDLE message, MESSAGE_BODY_TYPE_TAG* body_type)
     int message_set_message_format(MESSAGE_HANDLE message, stdint.uint32_t message_format)
     int message_get_message_format(MESSAGE_HANDLE message, stdint.uint32_t* message_format)
+    int message_get_delivery_tag(MESSAGE_HANDLE message, c_amqpvalue.AMQP_VALUE* delivery_tag)
+
 
 

@@ -1,5 +1,13 @@
 uAMQP for Python
 ================
+.. image:: https://img.shields.io/pypi/v/uamqp.svg
+    :target: https://pypi.python.org/pypi/uamqp/
+
+.. image:: https://img.shields.io/pypi/pyversions/uamqp.svg
+    :target: https://pypi.python.org/pypi/uamqp/
+
+.. image:: https://dev.azure.com/azure-sdk/public/_apis/build/status/python/azure-uamqp-python%20-%20client?branchName=master
+    :target: https://dev.azure.com/azure-sdk/public/_build?definitionId=89
 
 An AMQP 1.0 client library for Python.
 
@@ -7,7 +15,7 @@ An AMQP 1.0 client library for Python.
 Installation
 ============
 
-Wheels are provided for all major operating systems, so you can install directly with pip:
+Wheels are provided for most major operating systems, so you can install directly with pip:
 
 .. code:: shell
 
@@ -19,13 +27,20 @@ If you are running a Linux distro that does not support `ManyLinux1 <https://www
 .. code:: shell
 
     $ apt-get update
-    $ apt-get install -y build-essential libssl-dev python3-dev uuid-dev cmake python3-pip
-    $ pip3 install uamqp --no-binary
+    $ apt-get install -y build-essential libssl-dev uuid-dev cmake libcurl4-openssl-dev pkg-config python3-dev python3-pip
+    $ pip3 install uamqp --no-binary :all:
+
+If you are running Alpine, you can install from source:
+
+.. code:: shell
+
+    $ apk add --update python3 py-pip python3-dev cmake gcc g++ openssl-dev build-base
+    $ pip3 install uamqp --no-binary :all:
 
 
-Python 2.7 support
-++++++++++++++++++
-Coming soon...
+Documentation
++++++++++++++
+Reference documentation can be found here: `docs.microsoft.com/python/api/uamqp/uamqp <https://docs.microsoft.com/python/api/uamqp/uamqp>`__.
 
 
 Developer Setup
@@ -35,26 +50,21 @@ In order to run the code directly, the Cython extension will need to be build fi
 Pre-requisites
 ++++++++++++++
 
-- Windows: None
+- Windows: Setup a `build environment <https://packaging.python.org/guides/packaging-binary-extensions/#building-binary-extensions>`__.
 - Linux: Install dependencies as descriped above in the installation instructions.
-- MacOS: Install OpenSSL and UUID using Homebrew:
+- MacOS: Install cmake using Homebrew:
 
 .. code:: shell
 
-    $ brew install openssl@1.1
-    $ brew install ossp-uuid
+    $ brew install cmake
 
 Building the extension
 ++++++++++++++++++++++
 
-This project has two C library dependencies:
+This project has two C library dependencies. They are vendored in this repository in these versions:
 
-- `Azure uAMQP for C <https://github.com/Azure/azure-uamqp-c>`__
-- `Azure Shared Utility <https://github.com/Azure/azure-c-shared-utility>`__
-
-They are vendored in this repository in these versions:
-- Azure uAMQP @1.2.0
-- Azure C Shared Utility @2018-03-07-temp-pod
+- `Azure uAMQP for C <https://github.com/Azure/azure-uamqp-c>`__ @ `2021-01-20 <https://github.com/Azure/azure-uamqp-c/tree/bf3f62e8a2359e2a6b363502097bfcd87c1dff47>`__
+- `Azure C Shared Utility <https://github.com/Azure/azure-c-shared-utility>`__ @ `2021-01-19 <https://github.com/Azure/azure-c-shared-utility/tree/31c6e946cb35c9448d48f1f1f0e82d077ed05b98>`__
 
 To build, start by creating a virtual environment and installing the required Python packages:
 
@@ -62,13 +72,13 @@ To build, start by creating a virtual environment and installing the required Py
 
     $ python -m venv env
     $ env/Scripts/activate
-    (env)$ pip install -r requirements.txt
+    (env)$ pip install -r dev_requirements.txt
 
 Next, run the build command:
 
 .. code:: shell
 
-    $ python setup.py built_ext --inplace
+    $ python setup.py build_ext --inplace
 
 Tests
 +++++
@@ -93,12 +103,12 @@ Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
 Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.microsoft.com.
+the rights to use your contribution. For details, visit `https://cla.microsoft.com <https://cla.microsoft.com>`__.
 
 When you submit a pull request, a CLA-bot will automatically determine whether you need to provide
 a CLA and decorate the PR appropriately (e.g., label, comment). Simply follow the instructions
 provided by the bot. You will only need to do this once across all repos using our CLA.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+This project has adopted the `Microsoft Open Source Code of Conduct <https://opensource.microsoft.com/codeofconduct/>`__.
+For more information see the `Code of Conduct FAQ <https://opensource.microsoft.com/codeofconduct/faq/>`__ or
+contact `opencode@microsoft.com <mailto:opencode@microsoft.com>`__ with any additional questions or comments.

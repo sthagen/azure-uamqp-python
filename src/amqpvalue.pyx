@@ -8,6 +8,9 @@
 from enum import Enum
 import logging
 import uuid
+import copy
+
+import six
 
 # C improts
 from libc cimport stdint
@@ -22,7 +25,7 @@ cimport c_amqp_definitions
 _logger = logging.getLogger(__name__)
 
 
-cdef int batch_encode_callback(void* context, const unsigned char* encoded_bytes, size_t length):
+cdef int encode_bytes_callback(void* context, const unsigned char* encoded_bytes, size_t length):
     context_obj = <object>context
     context_obj.append(encoded_bytes[:length])
     return 0
@@ -33,12 +36,13 @@ cdef get_amqp_value_type(c_amqpvalue.AMQP_VALUE value):
     try:
         return AMQPType(type_val)
     except ValueError:
-        return AMQPType.UnknownType
+        _logger.info("Received unrecognized type value: %r", type_val)
+        return AMQPType.ErrorType
 
 
 cpdef enocde_batch_value(AMQPValue value, message_body):
     if c_amqpvalue.amqpvalue_encode(<c_amqpvalue.AMQP_VALUE>value._c_value,
-                                     <c_amqpvalue.AMQPVALUE_ENCODER_OUTPUT>batch_encode_callback,
+                                     <c_amqpvalue.AMQPVALUE_ENCODER_OUTPUT>encode_bytes_callback,
                                      <void*>message_body) != 0:
         raise ValueError("Failed to encode batched message data.")
 
@@ -68,12 +72,13 @@ class AMQPType(Enum):
     DescribedType = c_amqpvalue.AMQP_TYPE_TAG.AMQP_TYPE_DESCRIBED
     CompositeType = c_amqpvalue.AMQP_TYPE_TAG.AMQP_TYPE_COMPOSITE
     UnknownType = c_amqpvalue.AMQP_TYPE_TAG.AMQP_TYPE_UNKNOWN
+    ErrorType = 999
 
 
 cdef value_factory(c_amqpvalue.AMQP_VALUE value):
     type_val = get_amqp_value_type(value)
-    _logger.debug("Wrapping value type: {}".format(type_val))
-    if type_val == AMQPType.NullValue or type_val == AMQPType.UnknownType:
+    _logger.debug("Wrapping value type: %r", type_val)
+    if type_val == AMQPType.NullValue:
         new_obj = AMQPValue()
     elif type_val == AMQPType.BoolValue:
         new_obj = BoolValue()
@@ -120,7 +125,9 @@ cdef value_factory(c_amqpvalue.AMQP_VALUE value):
     elif type_val == AMQPType.DescribedType:
         new_obj = DescribedValue()
     else:
-        raise TypeError("Unrecognized AMQPType: {}".format(type_val))
+        error = "Unrecognized AMQPType: {}".format(type_val)
+        _logger.info(error)
+        raise TypeError(error)
     new_obj.wrap(value)
     return new_obj
 
@@ -218,9 +225,10 @@ cpdef uuid_value(value):
     return new_obj
 
 
-cpdef binary_value(char* value):
+cpdef binary_value(value):
+    bytes_value = six.binary_type(value)
     new_obj = BinaryValue()
-    new_obj.create(value)
+    new_obj.create(<bytes>bytes_value)
     return new_obj
 
 
@@ -270,7 +278,7 @@ cdef class AMQPValue(StructBase):
 
     def __dealloc__(self):
         if _logger:
-            _logger.debug("Deallocating {}".format(self.__class__.__name__))
+            _logger.debug("Deallocating %r", self.__class__.__name__)
         self.destroy()
 
     def __eq__(self, AMQPValue other):
@@ -280,20 +288,48 @@ cdef class AMQPValue(StructBase):
         return not c_amqpvalue.amqpvalue_are_equal(self._c_value, other._c_value)
 
     def __bytes__(self):
-        return c_amqpvalue.amqpvalue_to_string(self._c_value)
+        return self._as_string()
 
     def __str__(self):
-        return bytes(self).decode('utf-8', 'strict')
+        as_bytes = self._as_string()
+        if six.PY3:
+            try:
+                return as_bytes.decode('UTF-8')
+            except UnicodeDecodeError:
+                pass
+        return str(as_bytes)
+
+    def __unicode__(self):
+        as_bytes = self._as_string()
+        try:
+            return six.text_type(as_bytes.decode('UTF-8'))
+        except UnicodeDecodeError:
+            return six.text_type(as_bytes)
+
+    cpdef _as_string(self):
+        cdef c_amqpvalue.AMQP_VALUE value
+        cdef const char* as_string
+        value = c_amqpvalue.amqpvalue_clone(self._c_value)
+        if <void*>value == NULL:
+            self._value_error()
+        as_string = c_amqpvalue.amqpvalue_to_string(value)
+        py_string = copy.deepcopy(as_string)
+        c_amqpvalue.amqpvalue_destroy(self._c_value)
+        return py_string
 
     cdef _validate(self):
         if <void*>self._c_value is NULL:
             self._memory_error()
 
     cpdef destroy(self):
-        if <void*>self._c_value is not NULL:
-            if _logger:
-                _logger.debug("Destroying {}".format(self.__class__.__name__))
-            c_amqpvalue.amqpvalue_destroy(self._c_value)
+        try:
+            if <void*>self._c_value is not NULL:
+                if _logger:
+                    _logger.debug("Destroying %r", self.__class__.__name__)
+                c_amqpvalue.amqpvalue_destroy(self._c_value)
+        except KeyboardInterrupt:
+            pass
+        finally:
             self._c_value = <c_amqpvalue.AMQP_VALUE>NULL
 
     cdef wrap(self, c_amqpvalue.AMQP_VALUE value):
@@ -328,13 +364,6 @@ cdef class AMQPValue(StructBase):
         if <void*>value == NULL:
             self._value_error()
         return value_factory(value)
-
-    cpdef get_map(self):
-        cdef c_amqpvalue.AMQP_VALUE value
-        if c_amqpvalue.amqpvalue_get_map(self._c_value, &value) == 0:
-            return value_factory(value)
-        else:
-            self._value_error()
 
 
 cdef class BoolValue(AMQPValue):
@@ -599,11 +628,11 @@ cdef class BinaryValue(AMQPValue):
 
     _type = AMQPType.BinaryValue
 
-    def create(self, char* value):
+    def create(self, bytes value):
         cdef c_amqpvalue.amqp_binary _binary
         length = len(list(value))
         _binary.length = length
-        _binary.bytes = value
+        _binary.bytes = <char*>value
         new_value = c_amqpvalue.amqpvalue_create_binary(_binary)
         self.wrap(new_value)
 
@@ -640,7 +669,7 @@ cdef class StringValue(AMQPValue):
         assert self.type
         cdef const char* _value
         if c_amqpvalue.amqpvalue_get_string(self._c_value, &_value) == 0:
-            return _value.decode('utf-8', 'strict')
+            return copy.deepcopy(_value)
         else:
             self._value_error()
 
@@ -658,7 +687,7 @@ cdef class SymbolValue(AMQPValue):
         assert self.type
         cdef const char* _value
         if c_amqpvalue.amqpvalue_get_symbol(self._c_value, &_value) == 0:
-            return _value
+            return copy.deepcopy(_value)
         else:
             self._value_error()
 
@@ -681,7 +710,10 @@ cdef class ListValue(AMQPValue):
         value = c_amqpvalue.amqpvalue_get_list_item(self._c_value, index)
         if <void*>value == NULL:
             self._value_error()
-        return value_factory(value)
+        try:
+            return value_factory(value)
+        except TypeError:
+            return None
 
     def __setitem__(self, stdint.uint32_t index, AMQPValue value):
         assert value.type
@@ -710,7 +742,7 @@ cdef class ListValue(AMQPValue):
         assert self.type
         value = []
         for i in range(self.size):
-            value.append(self[i].value)
+            value.append(copy.deepcopy(self[i].value))
         return value
 
 
@@ -730,7 +762,10 @@ cdef class DictValue(AMQPValue):
         value = c_amqpvalue.amqpvalue_get_map_value(self._c_value, key._c_value)
         if <void*>value == NULL:
             raise KeyError("No value found for key: {}".format(key.value))
-        return value_factory(value)
+        try:
+            return value_factory(value)
+        except TypeError:
+            return None
 
     def __setitem__(self, AMQPValue key, AMQPValue value):
         if c_amqpvalue.amqpvalue_set_map_value(self._c_value, key._c_value, value._c_value) != 0:
@@ -760,7 +795,7 @@ cdef class DictValue(AMQPValue):
         value = {}
         for i in range(self.size):
             key, item = self.get(i)
-            value[key.value] = item.value
+            value[copy.deepcopy(key.value)] = copy.deepcopy(item.value)
         return value
 
 
@@ -805,7 +840,7 @@ cdef class ArrayValue(AMQPValue):
         assert self.type
         value = []
         for i in range(self.size):
-            value.append(self[i].value)
+            value.append(copy.deepcopy(self[i].value))
         return value
 
 
@@ -870,30 +905,44 @@ cdef class DescribedValue(AMQPValue):
     _type = AMQPType.DescribedType
 
     def create(self, AMQPValue descriptor, AMQPValue value):
-        new_value = c_amqpvalue.amqpvalue_create_described(
-            <c_amqpvalue.AMQP_VALUE>descriptor._c_value,
-            <c_amqpvalue.AMQP_VALUE>value._c_value)
+        cdef c_amqpvalue.AMQP_VALUE cloned_descriptor
+        cdef c_amqpvalue.AMQP_VALUE cloned_value
+        cloned_descriptor = c_amqpvalue.amqpvalue_clone(<c_amqpvalue.AMQP_VALUE>descriptor._c_value)
+        if <void*>cloned_descriptor == NULL:
+            self._value_error()
+        cloned_value = c_amqpvalue.amqpvalue_clone(<c_amqpvalue.AMQP_VALUE>value._c_value)
+        if <void*>cloned_value == NULL:
+            self._value_error()
+        new_value = c_amqpvalue.amqpvalue_create_described(cloned_descriptor, cloned_value)
         self.wrap(new_value)
 
     @property
     def description(self):
         cdef c_amqpvalue.AMQP_VALUE value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         value = c_amqpvalue.amqpvalue_get_inplace_descriptor(self._c_value)
         if <void*>value == NULL:
             self._value_error()
-        return value_factory(value)
+        cloned = c_amqpvalue.amqpvalue_clone(value)
+        if <void*>cloned == NULL:
+            self._value_error()
+        return value_factory(cloned)
 
     @property
     def data(self):
         cdef c_amqpvalue.AMQP_VALUE value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         value = c_amqpvalue.amqpvalue_get_inplace_described_value(self._c_value)
         if <void*>value == NULL:
             self._value_error()
-        return value_factory(value)
+        cloned = c_amqpvalue.amqpvalue_clone(value)
+        if <void*>cloned == NULL:
+            self._value_error()
+        return value_factory(cloned)
 
     @property
     def value(self):
         assert self.type
         #descriptor = self.description
         described = self.data
-        return described.value
+        return copy.deepcopy(described.value)

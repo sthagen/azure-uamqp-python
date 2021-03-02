@@ -10,8 +10,8 @@
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_uamqp_c/async_operation.h"
 #include "azure_c_shared_utility/tickcounter.h"
-#include "azure_c_shared_utility/umock_c_prod.h"
-#include "azure_c_shared_utility/macro_utils.h"
+#include "umock_c/umock_c_prod.h"
+#include "azure_macro_utils/macro_utils.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +23,7 @@ extern "C" {
     MESSAGE_SEND_TIMEOUT, \
     MESSAGE_SEND_CANCELLED
 
-DEFINE_ENUM(MESSAGE_SEND_RESULT, MESSAGE_SEND_RESULT_VALUES)
+MU_DEFINE_ENUM(MESSAGE_SEND_RESULT, MESSAGE_SEND_RESULT_VALUES)
 
 #define MESSAGE_SENDER_STATE_VALUES \
     MESSAGE_SENDER_STATE_IDLE, \
@@ -32,10 +32,10 @@ DEFINE_ENUM(MESSAGE_SEND_RESULT, MESSAGE_SEND_RESULT_VALUES)
     MESSAGE_SENDER_STATE_CLOSING, \
     MESSAGE_SENDER_STATE_ERROR
 
-DEFINE_ENUM(MESSAGE_SENDER_STATE, MESSAGE_SENDER_STATE_VALUES)
+MU_DEFINE_ENUM(MESSAGE_SENDER_STATE, MESSAGE_SENDER_STATE_VALUES)
 
     typedef struct MESSAGE_SENDER_INSTANCE_TAG* MESSAGE_SENDER_HANDLE;
-    typedef void(*ON_MESSAGE_SEND_COMPLETE)(void* context, MESSAGE_SEND_RESULT send_result);
+    typedef void(*ON_MESSAGE_SEND_COMPLETE)(void* context, MESSAGE_SEND_RESULT send_result, AMQP_VALUE delivery_state);
     typedef void(*ON_MESSAGE_SENDER_STATE_CHANGED)(void* context, MESSAGE_SENDER_STATE new_state, MESSAGE_SENDER_STATE previous_state);
 
     MOCKABLE_FUNCTION(, MESSAGE_SENDER_HANDLE, messagesender_create, LINK_HANDLE, link, ON_MESSAGE_SENDER_STATE_CHANGED, on_message_sender_state_changed, void*, context);

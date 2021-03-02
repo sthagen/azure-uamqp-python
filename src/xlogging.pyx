@@ -14,46 +14,23 @@ from libc.stdlib cimport malloc, free
 cimport c_xlogging
 
 
-_logger = logging.getLogger(__name__)
-_ERROR_CODES = [
-    SESSION_ERROR_WINDOW_VIOLATION,
-    SESSION_ERROR_ERRANT_LINK,
-    SESSION_ERROR_HANDLE_IN_USE,
-    SESSION_ERROR_UNATTACHED_HANDLE,
-    LINK_ERROR_DETACH_FORCED,
-    LINK_ERROR_TRANSFER_LIMIT_EXCEEDED,
-    LINK_ERROR_MESSAGE_SIZE_EXCEEDED,
-    LINK_ERROR_REDIRECT,
-    LINK_ERROR_STOLEN,
-    CONNECTION_ERROR_CONNECTION_FORCED,
-    CONNECTION_ERROR_FRAMING_ERROR,
-    CONNECTION_ERROR_REDIRECT,
-    AMQP_ERROR_INTERNAL_ERROR,
-    AMQP_ERROR_NOT_FOUND,
-    AMQP_ERROR_UNAUTHORIZED_ACCESS,
-    AMQP_ERROR_DECODE_ERROR,
-    AMQP_ERROR_RESOURCE_LIMIT_EXCEEDED,
-    AMQP_ERROR_NOT_ALLOWED,
-    AMQP_ERROR_INVALID_FIELD,
-    AMQP_ERROR_NOT_IMPLEMENTED,
-    AMQP_ERROR_RESOURCE_LOCKED,
-    AMQP_ERROR_PRECONDITION_FAILED,
-    AMQP_ERROR_RESOURCE_DELETED,
-    AMQP_ERROR_ILLEGAL_STATE,
-    AMQP_ERROR_FRAME_SIZE_TOO_SMALL,
-]
+_logger = logging.getLogger('uamqp.c_uamqp')
 
 
 class LogCategory(Enum):
-    Info = c_xlogging.LOG_CATEGORY_TAG.AZ_LOG_ERROR
-    Error = c_xlogging.LOG_CATEGORY_TAG.AZ_LOG_INFO
+    Error = c_xlogging.LOG_CATEGORY_TAG.AZ_LOG_ERROR
+    Info = c_xlogging.LOG_CATEGORY_TAG.AZ_LOG_INFO
     Debug = c_xlogging.LOG_CATEGORY_TAG.AZ_LOG_TRACE
 
 
 cdef char* vprintf_alloc(const char* format, c_xlogging.va_list va):
     cdef char* result
+    cdef c_xlogging.va_list va_copy
     cdef int neededSize
-    neededSize = c_xlogging.vsnprintf(NULL, 0, format, va)
+    c_xlogging.va_copy(va_copy, va);
+    neededSize = c_xlogging.vsnprintf(NULL, 0, format, va_copy)
+    c_xlogging.va_end(va_copy)
+
     if neededSize < 0:
         result = NULL
     else:
@@ -69,21 +46,32 @@ cdef void custom_logging_function(c_xlogging.LOG_CATEGORY_TAG log_category, cons
     log_level = LogCategory(log_category)
     cdef c_xlogging.va_list args
     cdef char* text
-
     c_xlogging.va_start(args, format)
-    text = vprintf_alloc(format, args)
-    if <void*>text != NULL:
-        py_text = text.decode('utf-8')
-        if log_level == LogCategory.Debug:
-            _logger.debug(py_text)
-        elif log_level == LogCategory.Info:
-            _logger.info(py_text)
-        else:
-            _logger.error("Error: file: {}, func: {}, line: {}, {}".format(
-                file, func, line, py_text))
-
-    c_xlogging.va_end(args)
+    try:
+        text = vprintf_alloc(format, args)
+        if <void*>text != NULL:
+            _python_log(log_level, text, bool(options), file=file, func=func, line=line)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        c_xlogging.va_end(args)
+        if <void*>text != NULL:
+            free(text)
 
 
-cpdef set_custom_logger():
+cpdef set_python_logger():
     c_xlogging.xlogging_set_log_function(<c_xlogging.LOGGER_LOG>custom_logging_function)
+
+
+def _python_log(category, text, end, text_bldr=[], file=None, func=None, line=None):
+    text_bldr.append(text)
+    if not end:
+        return
+
+    log_line = b''
+    while text_bldr:
+        log_line += text_bldr.pop(0)
+    if category == LogCategory.Debug or category == LogCategory.Info:
+        _logger.info("%r", log_line)
+    else:
+        _logger.info("%r (%r:%r:%r)", log_line, file, func, line)

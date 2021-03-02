@@ -37,17 +37,21 @@ cdef class cProperties(StructBase):
         self._validate()
 
     def __dealloc__(self):
-        _logger.debug("Deallocating {}".format(self.__class__.__name__))
-        #self.destroy()
+        _logger.debug("Deallocating cProperties")
+        self.destroy()
 
     cdef _validate(self):
         if <void*>self._c_value is NULL:
             self._memory_error()
 
     cpdef destroy(self):
-        if <void*>self._c_value is not NULL:
-            _logger.debug("Destroying {}".format(self.__class__.__name__))
-            c_amqp_definitions.properties_destroy(self._c_value)
+        try:
+            if <void*>self._c_value is not NULL:
+                _logger.debug("Destroying cProperties")
+                c_amqp_definitions.properties_destroy(self._c_value)
+        except KeyboardInterrupt:
+            pass
+        finally:
             self._c_value = <c_amqp_definitions.PROPERTIES_HANDLE>NULL
 
     cdef wrap(self, c_amqp_definitions.PROPERTIES_HANDLE value):
@@ -58,7 +62,7 @@ cdef class cProperties(StructBase):
     cdef load_from_value(self, AMQPValue value):
         self.destroy()
         if c_amqp_definitions.amqpvalue_get_properties(value._c_value, &self._c_value) != 0:
-            raise self._value_error()
+            self._value_error()
         self._validate()
 
     cdef get_properties(self):
@@ -80,10 +84,14 @@ cdef class cProperties(StructBase):
     @property
     def message_id(self):
         cdef c_amqpvalue.AMQP_VALUE _value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         if c_amqp_definitions.properties_get_message_id(self._c_value, &_value) == 0:
             if <void*>_value == NULL:
                 return None
-            return value_factory(_value)
+            cloned = c_amqpvalue.amqpvalue_clone(_value)
+            if <void*>cloned == NULL:
+                self._value_error()
+            return value_factory(cloned)
         else:
             return None
 
@@ -97,26 +105,31 @@ cdef class cProperties(StructBase):
     def user_id(self):
         cdef c_amqpvalue.amqp_binary _binary
         if c_amqp_definitions.properties_get_user_id(self._c_value, &_binary) == 0:
-            return <char*>_binary.bytes
+            bytes_value = <char*>_binary.bytes
+            return bytes_value[:_binary.length]
         else:
             return None
 
     @user_id.setter
-    def user_id(self, char* value):
+    def user_id(self, AMQPValue value):
         cdef c_amqpvalue.amqp_binary _binary
-        length = sizeof(value)
-        _binary.length = length
-        _binary.bytes = value
-        if c_amqp_definitions.properties_set_user_id(self._c_value, _binary) != 0:
+        if c_amqpvalue.amqpvalue_get_binary(value._c_value, &_binary) == 0:
+            if c_amqp_definitions.properties_set_user_id(self._c_value, _binary) != 0:
+                self._value_error("Could not set 'user_id'.")
+        else:
             self._value_error("Could not set 'user_id'.")
 
     @property
     def to(self):
         cdef c_amqpvalue.AMQP_VALUE _value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         if c_amqp_definitions.properties_get_to(self._c_value, &_value) == 0:
             if <void*>_value == NULL:
                 return None
-            return value_factory(_value)
+            cloned = c_amqpvalue.amqpvalue_clone(_value)
+            if <void*>cloned == NULL:
+                self._value_error()
+            return value_factory(cloned)
         else:
             return None
 
@@ -139,16 +152,20 @@ cdef class cProperties(StructBase):
     @subject.setter
     def subject(self, char* value):
         if c_amqp_definitions.properties_set_subject(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'subject'.")
 
     @property
     def reply_to(self):
         cdef c_amqpvalue.AMQP_VALUE _value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         if c_amqp_definitions.properties_get_reply_to(self._c_value, &_value) == 0:
             if <void*>_value == NULL:
                 return None
-            return value_factory(_value)
+            cloned = c_amqpvalue.amqpvalue_clone(_value)
+            if <void*>cloned == NULL:
+                self._value_error()
+            return value_factory(cloned)
         else:
             return None
 
@@ -161,10 +178,14 @@ cdef class cProperties(StructBase):
     @property
     def correlation_id(self):
         cdef c_amqpvalue.AMQP_VALUE _value
+        cdef c_amqpvalue.AMQP_VALUE cloned
         if c_amqp_definitions.properties_get_correlation_id(self._c_value, &_value) == 0:
             if <void*>_value == NULL:
                 return None
-            return value_factory(_value)
+            cloned = c_amqpvalue.amqpvalue_clone(_value)
+            if <void*>cloned == NULL:
+                self._value_error()
+            return value_factory(cloned)
         else:
             return None
 
@@ -187,7 +208,7 @@ cdef class cProperties(StructBase):
     @content_type.setter
     def content_type(self, char* value):
         if c_amqp_definitions.properties_set_content_type(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'content_type'.")
 
     @property
@@ -203,7 +224,7 @@ cdef class cProperties(StructBase):
     @content_encoding.setter
     def content_encoding(self, char* value):
         if c_amqp_definitions.properties_set_content_encoding(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'content_encoding'.")
 
     @property
@@ -219,7 +240,7 @@ cdef class cProperties(StructBase):
     @absolute_expiry_time.setter
     def absolute_expiry_time(self, c_amqpvalue.timestamp value):
         if c_amqp_definitions.properties_set_absolute_expiry_time(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'absolute_expiry_time'.")
 
     @property
@@ -235,7 +256,7 @@ cdef class cProperties(StructBase):
     @creation_time.setter
     def creation_time(self, c_amqpvalue.timestamp value):
         if c_amqp_definitions.properties_set_creation_time(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'create_time'.")
 
     @property
@@ -267,7 +288,7 @@ cdef class cProperties(StructBase):
     @group_sequence.setter
     def group_sequence(self, c_amqp_definitions.sequence_no value):
         if c_amqp_definitions.properties_set_group_sequence(
-            self._c_value, value._c_value) != 0:
+            self._c_value, value) != 0:
                 self._value_error("Could not set 'group_Sequence'.")
 
     @property

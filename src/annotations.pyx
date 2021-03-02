@@ -6,6 +6,7 @@
 
 # Python imports
 import logging
+import copy
 
 # C imports
 from libc cimport stdint
@@ -19,7 +20,10 @@ _logger = logging.getLogger(__name__)
 
 
 cdef annotations_factory(c_amqpvalue.AMQP_VALUE value):
-    wrapped = value_factory(value)
+    try:
+        wrapped = value_factory(value)
+    except TypeError:
+        return None
     if c_amqp_definitions.is_delivery_annotations_type_by_descriptor(<c_amqp_definitions.delivery_annotations>value):
         new_obj = create_delivery_annotations(wrapped)
     elif c_amqp_definitions.is_message_annotations_type_by_descriptor(<c_amqp_definitions.message_annotations>value):
@@ -50,7 +54,6 @@ cpdef create_delivery_annotations(AMQPValue value):
 
 
 cpdef create_message_annotations(AMQPValue value):
-    _logger.debug("creating ann")
     annotations = cMessageAnnotations()
     annotations.create(value)
     return annotations
@@ -76,17 +79,21 @@ cdef class cAnnotations(StructBase):
         pass
 
     def __dealloc__(self):
-        _logger.debug("Deallocating {}".format(self.__class__.__name__))
-        #self.destroy()
+        _logger.debug("Deallocating %r", self.__class__.__name__)
+        self.destroy()
 
     cdef _validate(self):
         if <void*>self._c_value is NULL:
             self._memory_error()
 
     cpdef destroy(self):
-        if <void*>self._c_value is not NULL:
-            _logger.debug("Destroying {}".format(self.__class__.__name__))
-            c_amqpvalue.amqpvalue_destroy(<c_amqpvalue.AMQP_VALUE>self._c_value)
+        try:
+            if <void*>self._c_value is not NULL:
+                _logger.debug("Destroying %r", self.__class__.__name__)
+                c_amqpvalue.amqpvalue_destroy(<c_amqpvalue.AMQP_VALUE>self._c_value)
+        except KeyboardInterrupt:
+            pass
+        finally:
             self._c_value = <c_amqpvalue.AMQP_VALUE>NULL
 
     cpdef clone(self):
@@ -115,17 +122,22 @@ cdef class cAnnotations(StructBase):
 
     @property
     def value(self):
-        return value_factory(self._c_value)
+        try:
+            return value_factory(self._c_value)
+        except TypeError:
+            return None
 
     @property
     def map(self):
-        cdef c_amqpvalue.AMQP_VALUE value
-        if c_amqpvalue.amqpvalue_get_map(self._c_value, &value) == 0:
-            if <void*>value == NULL:
+        cdef c_amqpvalue.AMQP_VALUE unmapped
+        cdef c_amqpvalue.AMQP_VALUE mapped
+        unmapped = c_amqpvalue.amqpvalue_clone(<c_amqpvalue.AMQP_VALUE>self._c_value)
+        if c_amqpvalue.amqpvalue_get_map(unmapped, &mapped) == 0:
+            if <void*>mapped == NULL:
                 return None
-            return value_factory(value)
+            return copy.deepcopy(value_factory(mapped).value)
         else:
-            self._value_error("Failed to get map.")
+            return None
 
 
 cdef class cApplicationProperties(cAnnotations):
@@ -135,6 +147,27 @@ cdef class cApplicationProperties(cAnnotations):
         self._c_value = c_amqp_definitions.amqpvalue_create_application_properties(
             <c_amqp_definitions.application_properties>value._c_value)
         self._validate()
+
+    @property
+    def map(self):
+        cdef c_amqpvalue.AMQP_VALUE unmapped
+        cdef c_amqpvalue.AMQP_VALUE mapped
+        cdef c_amqpvalue.AMQP_VALUE unextracted
+        cdef c_amqpvalue.AMQP_VALUE extracted
+        unextracted = c_amqpvalue.amqpvalue_clone(<c_amqpvalue.AMQP_VALUE>self._c_value)
+        extracted = c_amqpvalue.amqpvalue_get_inplace_described_value(unextracted)
+        unmapped = c_amqpvalue.amqpvalue_clone(extracted)
+        if <void*>unmapped == NULL:
+            result = None
+        elif c_amqpvalue.amqpvalue_get_map(unmapped, &mapped) == 0:
+            if <void*>mapped == NULL:
+                result = None
+            else:
+                result = copy.deepcopy(value_factory(mapped).value)
+        else:
+            result = None
+        c_amqpvalue.amqpvalue_destroy(unextracted)
+        return result
 
 
 cdef class cDeliveryAnnotations(cAnnotations):

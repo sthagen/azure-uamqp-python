@@ -3,12 +3,18 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include "azure_c_shared_utility/optimize_size.h"
+#include "azure_macro_utils/macro_utils.h"
 #include "azure_c_shared_utility/gballoc.h"
-#include "azure_c_shared_utility/xlogging.h"
 #include "azure_uamqp_c/session.h"
 #include "azure_uamqp_c/connection.h"
 #include "azure_uamqp_c/amqp_definitions.h"
+
+typedef enum LINK_ENDPOINT_STATE_TAG
+{
+    LINK_ENDPOINT_STATE_NOT_ATTACHED,
+    LINK_ENDPOINT_STATE_ATTACHED,
+    LINK_ENDPOINT_STATE_DETACHING
+} LINK_ENDPOINT_STATE;
 
 typedef struct LINK_ENDPOINT_INSTANCE_TAG
 {
@@ -20,6 +26,9 @@ typedef struct LINK_ENDPOINT_INSTANCE_TAG
     ON_SESSION_FLOW_ON on_session_flow_on;
     void* callback_context;
     SESSION_HANDLE session;
+    LINK_ENDPOINT_STATE link_endpoint_state;
+    ON_LINK_ENDPOINT_DESTROYED_CALLBACK on_link_endpoint_destroyed_callback;
+    void* on_link_endpoint_destroyed_context;
 } LINK_ENDPOINT_INSTANCE;
 
 typedef struct SESSION_INSTANCE_TAG
@@ -36,7 +45,7 @@ typedef struct SESSION_INSTANCE_TAG
     ON_LINK_ATTACHED on_link_attached;
     void* on_link_attached_callback_context;
 
-    /* Codes_SRS_SESSION_01_016: [next-outgoing-id The next-outgoing-id is the transfer-id to assign to the next transfer frame.] */
+    /* Codes_S_R_S_SESSION_01_016: [next-outgoing-id The next-outgoing-id is the transfer-id to assign to the next transfer frame.] */
     transfer_number next_outgoing_id;
     transfer_number next_incoming_id;
     uint32_t desired_incoming_window;
@@ -45,15 +54,79 @@ typedef struct SESSION_INSTANCE_TAG
     handle handle_max;
     uint32_t remote_incoming_window;
     uint32_t remote_outgoing_window;
-    int is_underlying_connection_open : 1;
+    unsigned int is_underlying_connection_open : 1;
 } SESSION_INSTANCE;
 
 #define UNDERLYING_CONNECTION_NOT_OPEN 0
-#define UNDERLYING_CONNECTION_OPEN -1
+#define UNDERLYING_CONNECTION_OPEN 1
+
+static void remove_link_endpoint(LINK_ENDPOINT_HANDLE link_endpoint)
+{
+    if (link_endpoint != NULL)
+    {
+        LINK_ENDPOINT_INSTANCE* endpoint_instance = (LINK_ENDPOINT_INSTANCE*)link_endpoint;
+        SESSION_INSTANCE* session_instance = endpoint_instance->session;
+        uint32_t i;
+
+        for (i = 0; i < session_instance->link_endpoint_count; i++)
+        {
+            if (session_instance->link_endpoints[i] == link_endpoint)
+            {
+                break;
+            }
+        }
+
+        if (i < session_instance->link_endpoint_count)
+        {
+            LINK_ENDPOINT_INSTANCE** new_endpoints;
+
+            if (i < (session_instance->link_endpoint_count - 1))
+            {
+                (void)memmove(&session_instance->link_endpoints[i], &session_instance->link_endpoints[i + 1], (session_instance->link_endpoint_count - (uint32_t)i - 1) * sizeof(LINK_ENDPOINT_INSTANCE*));
+            }
+
+            session_instance->link_endpoint_count--;
+
+            if (session_instance->link_endpoint_count == 0)
+            {
+                free(session_instance->link_endpoints);
+                session_instance->link_endpoints = NULL;
+            }
+            else
+            {
+                new_endpoints = (LINK_ENDPOINT_INSTANCE**)realloc(session_instance->link_endpoints, sizeof(LINK_ENDPOINT_INSTANCE*) * session_instance->link_endpoint_count);
+                if (new_endpoints != NULL)
+                {
+                    session_instance->link_endpoints = new_endpoints;
+                }
+            }
+        }
+    }
+}
+
+static void free_link_endpoint(LINK_ENDPOINT_HANDLE link_endpoint)
+{
+    // The link endpoint handle can be managed by both uamqp and the upper layer.
+    // uamqp may destroy a link endpoint if a DETACH is received from the remote endpoint,
+    // so in this case the upper layer must be notified so it does not attempt to destroy the link endpoint as well.
+    // Ref counting would not suffice to address this situation as uamqp does not destroy link endpoints by itself 
+    // every time, only when receiving a DETACH.
+    if (link_endpoint->on_link_endpoint_destroyed_callback != NULL)
+    {
+        link_endpoint->on_link_endpoint_destroyed_callback(link_endpoint, link_endpoint->on_link_endpoint_destroyed_context);
+    }
+
+    if (link_endpoint->name != NULL)
+    {
+        free(link_endpoint->name);
+    }
+
+    free(link_endpoint);
+}
 
 static void session_set_state(SESSION_INSTANCE* session_instance, SESSION_STATE session_state)
 {
-    uint64_t i;
+    uint32_t i;
 
     session_instance->previous_session_state = session_instance->session_state;
     session_instance->session_state = session_state;
@@ -62,7 +135,10 @@ static void session_set_state(SESSION_INSTANCE* session_instance, SESSION_STATE 
     {
         if (session_instance->link_endpoints[i]->on_session_state_changed != NULL)
         {
-            session_instance->link_endpoints[i]->on_session_state_changed(session_instance->link_endpoints[i]->callback_context, session_state, session_instance->previous_session_state);
+            if (session_instance->link_endpoints[i]->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING)
+            {
+                session_instance->link_endpoints[i]->on_session_state_changed(session_instance->link_endpoints[i]->callback_context, session_state, session_instance->previous_session_state);
+            }
         }
     }
 }
@@ -75,27 +151,27 @@ static int send_end_frame(SESSION_INSTANCE* session_instance, ERROR_HANDLE error
     end_performative = end_create();
     if (end_performative == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         if ((error_handle != NULL) &&
             (end_set_error(end_performative, error_handle) != 0))
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             AMQP_VALUE end_performative_value = amqpvalue_create_end(end_performative);
             if (end_performative_value == NULL)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 if (connection_encode_frame(session_instance->endpoint, end_performative_value, NULL, 0, NULL, NULL) != 0)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -119,7 +195,7 @@ static void end_session_with_error(SESSION_INSTANCE* session_instance, const cha
     {
         /* fatal error */
         session_set_state(session_instance, SESSION_STATE_DISCARDING);
-        (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot allocate error handle to end session");
+        (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot allocate error handle to end session", NULL);
     }
     else
     {
@@ -128,7 +204,7 @@ static void end_session_with_error(SESSION_INSTANCE* session_instance, const cha
         {
             /* fatal error */
             session_set_state(session_instance, SESSION_STATE_DISCARDING);
-            (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot allocate error handle to end session");
+            (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot allocate error handle to end session", NULL);
         }
         else
         {
@@ -146,33 +222,33 @@ static int send_begin(SESSION_INSTANCE* session_instance)
 
     if (begin == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         uint16_t remote_channel;
         if (begin_set_handle_max(begin, session_instance->handle_max) != 0)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if ((session_instance->session_state == SESSION_STATE_BEGIN_RCVD) &&
             ((connection_endpoint_get_incoming_channel(session_instance->endpoint, &remote_channel) != 0) ||
             (begin_set_remote_channel(begin, remote_channel) != 0)))
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             AMQP_VALUE begin_performative_value = amqpvalue_create_begin(begin);
             if (begin_performative_value == NULL)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 if (connection_encode_frame(session_instance->endpoint, begin_performative_value, NULL, 0, NULL, NULL) != 0)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -194,7 +270,7 @@ static int send_flow(SESSION_INSTANCE* session)
     int result;
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -202,26 +278,26 @@ static int send_flow(SESSION_INSTANCE* session)
 
         if (flow == NULL)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             if (flow_set_next_incoming_id(flow, session->next_incoming_id) != 0)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 AMQP_VALUE flow_performative_value = amqpvalue_create_flow(flow);
                 if (flow_performative_value == NULL)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
                     if (connection_encode_frame(session->endpoint, flow_performative_value, NULL, 0, NULL, NULL) != 0)
                     {
-                        result = __FAILURE__;
+                        result = MU_FAILURE;
                     }
                     else
                     {
@@ -293,7 +369,7 @@ static void on_connection_state_changed(void* context, CONNECTION_STATE new_conn
 {
     SESSION_INSTANCE* session_instance = (SESSION_INSTANCE*)context;
 
-    /* Codes_SRS_SESSION_01_060: [If the previous connection state is not OPENED and the new connection state is OPENED, the BEGIN frame shall be sent out and the state shall be switched to BEGIN_SENT.] */
+    /* Codes_S_R_S_SESSION_01_060: [If the previous connection state is not OPENED and the new connection state is OPENED, the BEGIN frame shall be sent out and the state shall be switched to BEGIN_SENT.] */
     if ((new_connection_state == CONNECTION_STATE_OPENED) && (previous_connection_state != CONNECTION_STATE_OPENED) && (session_instance->session_state == SESSION_STATE_UNMAPPED))
     {
         if (send_begin(session_instance) == 0)
@@ -301,12 +377,12 @@ static void on_connection_state_changed(void* context, CONNECTION_STATE new_conn
             session_set_state(session_instance, SESSION_STATE_BEGIN_SENT);
         }
     }
-    /* Codes_SRS_SESSION_01_061: [If the previous connection state is OPENED and the new connection state is not OPENED anymore, the state shall be switched to DISCARDING.] */
+    /* Codes_S_R_S_SESSION_01_061: [If the previous connection state is OPENED and the new connection state is not OPENED anymore, the state shall be switched to DISCARDING.] */
     else if ((new_connection_state == CONNECTION_STATE_CLOSE_RCVD) || (new_connection_state == CONNECTION_STATE_END))
     {
         session_set_state(session_instance, SESSION_STATE_DISCARDING);
     }
-    /* Codes_SRS_SESSION_09_001: [If the new connection state is ERROR, the state shall be switched to ERROR.] */
+    /* Codes_S_R_S_SESSION_09_001: [If the new connection state is ERROR, the state shall be switched to ERROR.] */
     else if (new_connection_state == CONNECTION_STATE_ERROR)
     {
         session_set_state(session_instance, SESSION_STATE_ERROR);
@@ -324,7 +400,7 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
 
         if (amqpvalue_get_begin(performative, &begin_handle) != 0)
         {
-            connection_close(session_instance->connection, "amqp:decode-error", "Cannot decode BEGIN frame");
+            connection_close(session_instance->connection, "amqp:decode-error", "Cannot decode BEGIN frame", NULL);
         }
         else
         {
@@ -334,7 +410,7 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                 /* error */
                 begin_destroy(begin_handle);
                 session_set_state(session_instance, SESSION_STATE_DISCARDING);
-                connection_close(session_instance->connection, "amqp:decode-error", "Cannot get incoming windows and next outgoing id");
+                connection_close(session_instance->connection, "amqp:decode-error", "Cannot get incoming windows and next outgoing id", NULL);
             }
             else
             {
@@ -349,7 +425,7 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                     session_set_state(session_instance, SESSION_STATE_BEGIN_RCVD);
                     if (send_begin(session_instance) != 0)
                     {
-                        connection_close(session_instance->connection, "amqp:internal-error", "Failed sending BEGIN frame");
+                        connection_close(session_instance->connection, "amqp:internal-error", "Failed sending BEGIN frame", NULL);
                         session_set_state(session_instance, SESSION_STATE_DISCARDING);
                     }
                     else
@@ -374,6 +450,7 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
             role role;
             AMQP_VALUE source;
             AMQP_VALUE target;
+            fields properties;
 
             if (attach_get_name(attach_handle, &name) != 0)
             {
@@ -383,17 +460,24 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
             {
                 end_session_with_error(session_instance, "amqp:decode-error", "Cannot get link role from ATTACH frame");
             }
-            else if (attach_get_source(attach_handle, &source) != 0)
-            {
-                end_session_with_error(session_instance, "amqp:decode-error", "Cannot get link source from ATTACH frame");
-            }
-            else  if (attach_get_target(attach_handle, &target) != 0)
-            {
-                end_session_with_error(session_instance, "amqp:decode-error", "Cannot get link target from ATTACH frame");
-            }
             else
             {
-                LINK_ENDPOINT_INSTANCE* link_endpoint = find_link_endpoint_by_name(session_instance, name);
+                LINK_ENDPOINT_INSTANCE* link_endpoint;
+
+                if (attach_get_source(attach_handle, &source) != 0)
+                {
+                    source = NULL;
+                }
+                if (attach_get_target(attach_handle, &target) != 0)
+                {
+                    target = NULL;
+                }
+                if (attach_get_properties(attach_handle, &properties) != 0)
+                {
+                    properties = NULL;
+                }
+
+                link_endpoint = find_link_endpoint_by_name(session_instance, name);
                 if (link_endpoint == NULL)
                 {
                     /* new link attach */
@@ -410,9 +494,12 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                         }
                         else
                         {
-                            if (!session_instance->on_link_attached(session_instance->on_link_attached_callback_context, new_link_endpoint, name, role, source, target))
+                            new_link_endpoint->link_endpoint_state = LINK_ENDPOINT_STATE_ATTACHED;
+
+                            if (!session_instance->on_link_attached(session_instance->on_link_attached_callback_context, new_link_endpoint, name, role, source, target, properties))
                             {
-                                session_destroy_link_endpoint(new_link_endpoint);
+                                remove_link_endpoint(new_link_endpoint);
+                                free_link_endpoint(new_link_endpoint);
                                 new_link_endpoint = NULL;
                             }
                             else
@@ -433,6 +520,16 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                     }
                     else
                     {
+                        link_endpoint->link_endpoint_state = LINK_ENDPOINT_STATE_ATTACHED;
+
+                        if (session_instance->on_link_attached != NULL)
+                        {
+                            if (!session_instance->on_link_attached(session_instance->on_link_attached_callback_context, link_endpoint, name, role, source, target, properties))
+                            {
+                                link_endpoint->link_endpoint_state = LINK_ENDPOINT_STATE_DETACHING;
+                            }
+                        }
+
                         link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
                     }
                 }
@@ -470,7 +567,17 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                 }
                 else
                 {
-                    link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+                    if (link_endpoint->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING)
+                    {
+                        link_endpoint->link_endpoint_state = LINK_ENDPOINT_STATE_DETACHING;
+                        link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+                    }
+                    else
+                    {
+                        /* remove the link endpoint */
+                        remove_link_endpoint(link_endpoint);
+                        free_link_endpoint(link_endpoint);
+                    }
                 }
             }
         }
@@ -492,8 +599,8 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
             if (flow_get_next_incoming_id(flow_handle, &flow_next_incoming_id) != 0)
             {
                 /*
-                If the next-incoming-id field of the flow frame is not set, 
-                then remote-incomingwindow is computed as follows: 
+                If the next-incoming-id field of the flow frame is not set,
+                then remote-incomingwindow is computed as follows:
                 initial-outgoing-id(endpoint) + incoming-window(flow) - next-outgoing-id(endpoint)
                 */
                 flow_next_incoming_id = session_instance->next_outgoing_id;
@@ -522,14 +629,18 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
 
                 if (link_endpoint_instance != NULL)
                 {
-                    link_endpoint_instance->frame_received_callback(link_endpoint_instance->callback_context, performative, payload_size, payload_bytes);
+                    if (link_endpoint_instance->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING)
+                    {
+                        link_endpoint_instance->frame_received_callback(link_endpoint_instance->callback_context, performative, payload_size, payload_bytes);
+                    }
                 }
 
                 i = 0;
                 while ((session_instance->remote_incoming_window > 0) && (i < session_instance->link_endpoint_count))
                 {
                     /* notify the caller that it can send here */
-                    if (session_instance->link_endpoints[i]->on_session_flow_on != NULL)
+                    if (session_instance->link_endpoints[i]->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING &&
+                        session_instance->link_endpoints[i]->on_session_flow_on != NULL)
                     {
                         session_instance->link_endpoints[i]->on_session_flow_on(session_instance->link_endpoints[i]->callback_context);
                     }
@@ -574,7 +685,10 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                 }
                 else
                 {
-                    link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+                    if (link_endpoint->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING)
+                    {
+                        link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+                    }
                 }
 
                 if (session_instance->incoming_window == 0)
@@ -592,7 +706,10 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
         for (i = 0; i < session_instance->link_endpoint_count; i++)
         {
             LINK_ENDPOINT_INSTANCE* link_endpoint = session_instance->link_endpoints[i];
-            link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+            if (link_endpoint->link_endpoint_state != LINK_ENDPOINT_STATE_DETACHING)
+            {
+                link_endpoint->frame_received_callback(link_endpoint->callback_context, performative, payload_size, payload_bytes);
+            }
         }
     }
     else if (is_end_type_by_descriptor(descriptor))
@@ -613,7 +730,7 @@ static void on_frame_received(void* context, AMQP_VALUE performative, uint32_t p
                 if (send_end_frame(session_instance, NULL) != 0)
                 {
                     /* fatal error */
-                    (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot send END frame.");
+                    (void)connection_close(session_instance->connection, "amqp:internal-error", "Cannot send END frame.", NULL);
                 }
 
                 session_set_state(session_instance, SESSION_STATE_DISCARDING);
@@ -628,14 +745,14 @@ SESSION_HANDLE session_create(CONNECTION_HANDLE connection, ON_LINK_ATTACHED on_
 
     if (connection == NULL)
     {
-        /* Codes_SRS_SESSION_01_031: [If connection is NULL, session_create shall fail and return NULL.] */
+        /* Codes_S_R_S_SESSION_01_031: [If connection is NULL, session_create shall fail and return NULL.] */
         result = NULL;
     }
     else
     {
-        /* Codes_SRS_SESSION_01_030: [session_create shall create a new session instance and return a non-NULL handle to it.] */
-        result = (SESSION_INSTANCE*)malloc(sizeof(SESSION_INSTANCE));
-        /* Codes_SRS_SESSION_01_042: [If allocating memory for the session fails, session_create shall fail and return NULL.] */
+        /* Codes_S_R_S_SESSION_01_030: [session_create shall create a new session instance and return a non-NULL handle to it.] */
+        result = (SESSION_INSTANCE*)calloc(1, sizeof(SESSION_INSTANCE));
+        /* Codes_S_R_S_SESSION_01_042: [If allocating memory for the session fails, session_create shall fail and return NULL.] */
         if (result != NULL)
         {
             result->connection = connection;
@@ -643,8 +760,8 @@ SESSION_HANDLE session_create(CONNECTION_HANDLE connection, ON_LINK_ATTACHED on_
             result->link_endpoint_count = 0;
             result->handle_max = 4294967295u;
 
-            /* Codes_SRS_SESSION_01_057: [The delivery ids shall be assigned starting at 0.] */
-            /* Codes_SRS_SESSION_01_017: [The nextoutgoing-id MAY be initialized to an arbitrary value ] */
+            /* Codes_S_R_S_SESSION_01_057: [The delivery ids shall be assigned starting at 0.] */
+            /* Codes_S_R_S_SESSION_01_017: [The nextoutgoing-id MAY be initialized to an arbitrary value ] */
             result->next_outgoing_id = 0;
 
             result->desired_incoming_window = 1;
@@ -659,11 +776,11 @@ SESSION_HANDLE session_create(CONNECTION_HANDLE connection, ON_LINK_ATTACHED on_
             result->on_link_attached = on_link_attached;
             result->on_link_attached_callback_context = callback_context;
 
-            /* Codes_SRS_SESSION_01_032: [session_create shall create a new session endpoint by calling connection_create_endpoint.] */
+            /* Codes_S_R_S_SESSION_01_032: [session_create shall create a new session endpoint by calling connection_create_endpoint.] */
             result->endpoint = connection_create_endpoint(connection);
             if (result->endpoint == NULL)
             {
-                /* Codes_SRS_SESSION_01_033: [If connection_create_endpoint fails, session_create shall fail and return NULL.] */
+                /* Codes_S_R_S_SESSION_01_033: [If connection_create_endpoint fails, session_create shall fail and return NULL.] */
                 free(result);
                 result = NULL;
             }
@@ -687,7 +804,7 @@ SESSION_HANDLE session_create_from_endpoint(CONNECTION_HANDLE connection, ENDPOI
     }
     else
     {
-        result = (SESSION_INSTANCE*)malloc(sizeof(SESSION_INSTANCE));
+        result = (SESSION_INSTANCE*)calloc(1, sizeof(SESSION_INSTANCE));
         if (result != NULL)
         {
             result->connection = connection;
@@ -719,15 +836,15 @@ SESSION_HANDLE session_create_from_endpoint(CONNECTION_HANDLE connection, ENDPOI
 
 void session_destroy(SESSION_HANDLE session)
 {
-    /* Codes_SRS_SESSION_01_036: [If session is NULL, session_destroy shall do nothing.] */
+    /* Codes_S_R_S_SESSION_01_036: [If session is NULL, session_destroy shall do nothing.] */
     if (session != NULL)
     {
         SESSION_INSTANCE* session_instance = (SESSION_INSTANCE*)session;
 
         session_end(session, NULL, NULL);
 
-        /* Codes_SRS_SESSION_01_034: [session_destroy shall free all resources allocated by session_create.] */
-        /* Codes_SRS_SESSION_01_035: [The endpoint created in session_create shall be freed by calling connection_destroy_endpoint.] */
+        /* Codes_S_R_S_SESSION_01_034: [session_destroy shall free all resources allocated by session_create.] */
+        /* Codes_S_R_S_SESSION_01_035: [The endpoint created in session_create shall be freed by calling connection_destroy_endpoint.] */
         connection_destroy_endpoint(session_instance->endpoint);
         if (session_instance->link_endpoints != NULL)
         {
@@ -744,7 +861,7 @@ int session_begin(SESSION_HANDLE session)
 
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -752,7 +869,7 @@ int session_begin(SESSION_HANDLE session)
 
         if (connection_start_endpoint(session_instance->endpoint, on_frame_received, on_connection_state_changed, session_instance) != 0)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
@@ -761,7 +878,7 @@ int session_begin(SESSION_HANDLE session)
                 if (connection_open(session_instance->connection) != 0)
                 {
                     session_instance->is_underlying_connection_open = UNDERLYING_CONNECTION_NOT_OPEN;
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -785,11 +902,12 @@ int session_end(SESSION_HANDLE session, const char* condition_value, const char*
 
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         SESSION_INSTANCE* session_instance = (SESSION_INSTANCE*)session;
+        size_t i;
 
         if ((session_instance->session_state != SESSION_STATE_UNMAPPED) &&
             (session_instance->session_state != SESSION_STATE_DISCARDING))
@@ -802,13 +920,13 @@ int session_end(SESSION_HANDLE session, const char* condition_value, const char*
                 error_handle = error_create(condition_value);
                 if (error_handle == NULL)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
                     if (error_set_description(error_handle, description) != 0)
                     {
-                        result = __FAILURE__;
+                        result = MU_FAILURE;
                     }
                 }
             }
@@ -817,7 +935,7 @@ int session_end(SESSION_HANDLE session, const char* condition_value, const char*
             {
                 if (send_end_frame(session_instance, error_handle) != 0)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -835,6 +953,14 @@ int session_end(SESSION_HANDLE session, const char* condition_value, const char*
         {
             result = 0;
         }
+
+        // all link endpoints are destroyed when the session end happens
+        for (i = 0; i < session_instance->link_endpoint_count; i++)
+        {
+            free_link_endpoint(session_instance->link_endpoints[i]);
+        }
+
+        session_instance->link_endpoint_count = 0;
     }
 
     return result;
@@ -846,7 +972,7 @@ int session_set_incoming_window(SESSION_HANDLE session, uint32_t incoming_window
 
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -868,7 +994,7 @@ int session_get_incoming_window(SESSION_HANDLE session, uint32_t* incoming_windo
     if ((session == NULL) ||
         (incoming_window == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -888,7 +1014,7 @@ int session_set_outgoing_window(SESSION_HANDLE session, uint32_t outgoing_window
 
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -909,7 +1035,7 @@ int session_get_outgoing_window(SESSION_HANDLE session, uint32_t* outgoing_windo
     if ((session == NULL) ||
         (outgoing_window == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -929,7 +1055,7 @@ int session_set_handle_max(SESSION_HANDLE session, handle handle_max)
 
     if (session == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -950,7 +1076,7 @@ int session_get_handle_max(SESSION_HANDLE session, handle* handle_max)
     if ((session == NULL) ||
         (handle_max == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -968,7 +1094,7 @@ LINK_ENDPOINT_HANDLE session_create_link_endpoint(SESSION_HANDLE session, const 
 {
     LINK_ENDPOINT_INSTANCE* result;
 
-    /* Codes_SRS_SESSION_01_044: [If session, name or frame_received_callback is NULL, session_create_link_endpoint shall fail and return NULL.] */
+    /* Codes_S_R_S_SESSION_01_044: [If session, name or frame_received_callback is NULL, session_create_link_endpoint shall fail and return NULL.] */
     if ((session == NULL) ||
         (name == NULL))
     {
@@ -976,14 +1102,14 @@ LINK_ENDPOINT_HANDLE session_create_link_endpoint(SESSION_HANDLE session, const 
     }
     else
     {
-        /* Codes_SRS_SESSION_01_043: [session_create_link_endpoint shall create a link endpoint associated with a given session and return a non-NULL handle to it.] */
+        /* Codes_S_R_S_SESSION_01_043: [session_create_link_endpoint shall create a link endpoint associated with a given session and return a non-NULL handle to it.] */
         SESSION_INSTANCE* session_instance = (SESSION_INSTANCE*)session;
 
-        result = (LINK_ENDPOINT_INSTANCE*)malloc(sizeof(LINK_ENDPOINT_INSTANCE));
-        /* Codes_SRS_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
+        result = (LINK_ENDPOINT_INSTANCE*)calloc(1, sizeof(LINK_ENDPOINT_INSTANCE));
+        /* Codes_S_R_S_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
         if (result != NULL)
         {
-            /* Codes_SRS_SESSION_01_046: [An unused handle shall be assigned to the link endpoint.] */
+            /* Codes_S_R_S_SESSION_01_046: [An unused handle shall be assigned to the link endpoint.] */
             handle selected_handle = 0;
             size_t i;
             size_t name_length;
@@ -1004,11 +1130,14 @@ LINK_ENDPOINT_HANDLE session_create_link_endpoint(SESSION_HANDLE session, const 
             result->callback_context = NULL;
             result->output_handle = selected_handle;
             result->input_handle = 0xFFFFFFFF;
+            result->link_endpoint_state = LINK_ENDPOINT_STATE_NOT_ATTACHED;
             name_length = strlen(name);
             result->name = (char*)malloc(name_length + 1);
+            result->on_link_endpoint_destroyed_callback = NULL;
+            result->on_link_endpoint_destroyed_context = NULL;
             if (result->name == NULL)
             {
-                /* Codes_SRS_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
+                /* Codes_S_R_S_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
                 free(result);
                 result = NULL;
             }
@@ -1021,7 +1150,7 @@ LINK_ENDPOINT_HANDLE session_create_link_endpoint(SESSION_HANDLE session, const 
                 new_link_endpoints = (LINK_ENDPOINT_INSTANCE**)realloc(session_instance->link_endpoints, sizeof(LINK_ENDPOINT_INSTANCE*) * (session_instance->link_endpoint_count + 1));
                 if (new_link_endpoints == NULL)
                 {
-                    /* Codes_SRS_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
+                    /* Codes_S_R_S_SESSION_01_045: [If allocating memory for the link endpoint fails, session_create_link_endpoint shall fail and return NULL.] */
                     free(result->name);
                     free(result);
                     result = NULL;
@@ -1045,56 +1174,30 @@ LINK_ENDPOINT_HANDLE session_create_link_endpoint(SESSION_HANDLE session, const 
     return result;
 }
 
+void session_set_link_endpoint_callback(LINK_ENDPOINT_HANDLE link_endpoint, ON_LINK_ENDPOINT_DESTROYED_CALLBACK on_link_endpoint_destroyed, void* context)
+{
+    if (link_endpoint != NULL)
+    {
+        link_endpoint->on_link_endpoint_destroyed_callback = on_link_endpoint_destroyed;
+        link_endpoint->on_link_endpoint_destroyed_context = context;
+    }
+}
+
 void session_destroy_link_endpoint(LINK_ENDPOINT_HANDLE link_endpoint)
 {
-    /* Codes_SRS_SESSION_01_050: [If link_endpoint is NULL, session_destroy_link_endpoint shall do nothing.] */
     if (link_endpoint != NULL)
     {
         LINK_ENDPOINT_INSTANCE* endpoint_instance = (LINK_ENDPOINT_INSTANCE*)link_endpoint;
-        SESSION_INSTANCE* session_instance = endpoint_instance->session;
-        uint64_t i;
 
-        /* Codes_SRS_SESSION_01_049: [session_destroy_link_endpoint shall free all resources associated with the endpoint.] */
-        for (i = 0; i < session_instance->link_endpoint_count; i++)
+        if (endpoint_instance->link_endpoint_state == LINK_ENDPOINT_STATE_ATTACHED)
         {
-            if (session_instance->link_endpoints[i] == link_endpoint)
-            {
-                break;
-            }
+            endpoint_instance->link_endpoint_state = LINK_ENDPOINT_STATE_DETACHING;
         }
-
-        if (i < session_instance->link_endpoint_count)
+        else
         {
-            LINK_ENDPOINT_INSTANCE** new_endpoints;
-
-            if (i < (session_instance->link_endpoint_count - 1))
-            {
-                (void)memmove(&session_instance->link_endpoints[i], &session_instance->link_endpoints[i + 1], (session_instance->link_endpoint_count - (uint32_t)i - 1) * sizeof(LINK_ENDPOINT_INSTANCE*));
-            }
-
-            session_instance->link_endpoint_count--;
-
-            if (session_instance->link_endpoint_count == 0)
-            {
-                free(session_instance->link_endpoints);
-                session_instance->link_endpoints = NULL;
-            }
-            else
-            {
-                new_endpoints = (LINK_ENDPOINT_INSTANCE**)realloc(session_instance->link_endpoints, sizeof(LINK_ENDPOINT_INSTANCE*) * session_instance->link_endpoint_count);
-                if (new_endpoints != NULL)
-                {
-                    session_instance->link_endpoints = new_endpoints;
-                }
-            }
+            remove_link_endpoint(link_endpoint);
+            free_link_endpoint(link_endpoint);
         }
-
-        if (endpoint_instance->name != NULL)
-        {
-            free(endpoint_instance->name);
-        }
-
-        free(endpoint_instance);
     }
 }
 
@@ -1105,7 +1208,7 @@ int session_start_link_endpoint(LINK_ENDPOINT_HANDLE link_endpoint, ON_ENDPOINT_
     if ((link_endpoint == NULL) ||
         (frame_received_callback == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1113,6 +1216,7 @@ int session_start_link_endpoint(LINK_ENDPOINT_HANDLE link_endpoint, ON_ENDPOINT_
         link_endpoint->on_session_state_changed = on_session_state_changed;
         link_endpoint->on_session_flow_on = on_session_flow_on;
         link_endpoint->callback_context = context;
+        link_endpoint->link_endpoint_state = LINK_ENDPOINT_STATE_NOT_ATTACHED;
 
         if (link_endpoint->on_session_state_changed != NULL)
         {
@@ -1132,7 +1236,7 @@ static int encode_frame(LINK_ENDPOINT_HANDLE link_endpoint, AMQP_VALUE performat
     if ((link_endpoint == NULL) ||
         (performative == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1141,7 +1245,7 @@ static int encode_frame(LINK_ENDPOINT_HANDLE link_endpoint, AMQP_VALUE performat
 
         if (connection_encode_frame(session_instance->endpoint, performative, payloads, payload_count, NULL, NULL) != 0)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
@@ -1159,7 +1263,7 @@ int session_send_flow(LINK_ENDPOINT_HANDLE link_endpoint, FLOW_HANDLE flow)
     if ((link_endpoint == NULL) ||
         (flow == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1172,7 +1276,7 @@ int session_send_flow(LINK_ENDPOINT_HANDLE link_endpoint, FLOW_HANDLE flow)
         {
             if (flow_set_next_incoming_id(flow, session_instance->next_incoming_id) != 0)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
         }
 
@@ -1184,20 +1288,20 @@ int session_send_flow(LINK_ENDPOINT_HANDLE link_endpoint, FLOW_HANDLE flow)
                 (flow_set_outgoing_window(flow, session_instance->outgoing_window) != 0) ||
                 (flow_set_handle(flow, link_endpoint_instance->output_handle) != 0))
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 AMQP_VALUE flow_performative_value = amqpvalue_create_flow(flow);
                 if (flow_performative_value == NULL)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
                     if (encode_frame(link_endpoint, flow_performative_value, NULL, 0) != 0)
                     {
-                        result = __FAILURE__;
+                        result = MU_FAILURE;
                     }
                     else
                     {
@@ -1220,7 +1324,7 @@ int session_send_attach(LINK_ENDPOINT_HANDLE link_endpoint, ATTACH_HANDLE attach
     if ((link_endpoint == NULL) ||
         (attach == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1228,20 +1332,20 @@ int session_send_attach(LINK_ENDPOINT_HANDLE link_endpoint, ATTACH_HANDLE attach
 
         if (attach_set_handle(attach, link_endpoint_instance->output_handle) != 0)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             AMQP_VALUE attach_performative_value = amqpvalue_create_attach(attach);
             if (attach_performative_value == NULL)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 if (encode_frame(link_endpoint, attach_performative_value, NULL, 0) != 0)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -1263,20 +1367,20 @@ int session_send_disposition(LINK_ENDPOINT_HANDLE link_endpoint, DISPOSITION_HAN
     if ((link_endpoint == NULL) ||
         (disposition == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         AMQP_VALUE disposition_performative_value = amqpvalue_create_disposition(disposition);
         if (disposition_performative_value == NULL)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             if (encode_frame(link_endpoint, disposition_performative_value, NULL, 0) != 0)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -1297,7 +1401,7 @@ int session_send_detach(LINK_ENDPOINT_HANDLE link_endpoint, DETACH_HANDLE detach
     if ((link_endpoint == NULL) ||
         (detach == NULL))
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1305,20 +1409,20 @@ int session_send_detach(LINK_ENDPOINT_HANDLE link_endpoint, DETACH_HANDLE detach
 
         if (detach_set_handle(detach, link_endpoint_instance->output_handle) != 0)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             AMQP_VALUE detach_performative_value = amqpvalue_create_detach(detach);
             if (detach_performative_value == NULL)
             {
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
                 if (encode_frame(link_endpoint, detach_performative_value, NULL, 0) != 0)
                 {
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -1333,12 +1437,12 @@ int session_send_detach(LINK_ENDPOINT_HANDLE link_endpoint, DETACH_HANDLE detach
     return result;
 }
 
-/* Codes_SRS_SESSION_01_051: [session_send_transfer shall send a transfer frame with the performative indicated in the transfer argument.] */
+/* Codes_S_R_S_SESSION_01_051: [session_send_transfer shall send a transfer frame with the performative indicated in the transfer argument.] */
 SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_endpoint, TRANSFER_HANDLE transfer, PAYLOAD* payloads, size_t payload_count, delivery_number* delivery_id, ON_SEND_COMPLETE on_send_complete, void* callback_context)
 {
     SESSION_SEND_TRANSFER_RESULT result;
 
-    /* Codes_SRS_SESSION_01_054: [If link_endpoint or transfer is NULL, session_send_transfer shall fail and return a non-zero value.] */
+    /* Codes_S_R_S_SESSION_01_054: [If link_endpoint or transfer is NULL, session_send_transfer shall fail and return a non-zero value.] */
     if ((link_endpoint == NULL) ||
         (transfer == NULL))
     {
@@ -1349,7 +1453,7 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
         LINK_ENDPOINT_INSTANCE* link_endpoint_instance = (LINK_ENDPOINT_INSTANCE*)link_endpoint;
         SESSION_INSTANCE* session_instance = (SESSION_INSTANCE*)link_endpoint_instance->session;
 
-        /* Codes_SRS_SESSION_01_059: [When session_send_transfer is called while the session is not in the MAPPED state, session_send_transfer shall fail and return a non-zero value.] */
+        /* Codes_S_R_S_SESSION_01_059: [When session_send_transfer is called while the session is not in the MAPPED state, session_send_transfer shall fail and return a non-zero value.] */
         if (session_instance->session_state != SESSION_STATE_MAPPED)
         {
             result = SESSION_SEND_TRANSFER_ERROR;
@@ -1383,14 +1487,14 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
                 }
                 else
                 {
-                    /* Codes_SRS_SESSION_01_012: [The session endpoint assigns each outgoing transfer frame an implicit transfer-id from a session scoped sequence.] */
-                    /* Codes_SRS_SESSION_01_027: [sending a transfer Upon sending a transfer, the sending endpoint will increment its next-outgoing-id] */
+                    /* Codes_S_R_S_SESSION_01_012: [The session endpoint assigns each outgoing transfer frame an implicit transfer-id from a session scoped sequence.] */
+                    /* Codes_S_R_S_SESSION_01_027: [sending a transfer Upon sending a transfer, the sending endpoint will increment its next-outgoing-id] */
                     *delivery_id = session_instance->next_outgoing_id;
                     if ((transfer_set_handle(transfer, link_endpoint_instance->output_handle) != 0) ||
                         (transfer_set_delivery_id(transfer, *delivery_id) != 0) ||
                         (transfer_set_more(transfer, false) != 0))
                     {
-                        /* Codes_SRS_SESSION_01_058: [When any other error occurs, session_send_transfer shall fail and return a non-zero value.] */
+                        /* Codes_S_R_S_SESSION_01_058: [When any other error occurs, session_send_transfer shall fail and return a non-zero value.] */
                         result = SESSION_SEND_TRANSFER_ERROR;
                     }
                     else
@@ -1400,7 +1504,7 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
                         transfer_value = amqpvalue_create_transfer(transfer);
                         if (transfer_value == NULL)
                         {
-                            /* Codes_SRS_SESSION_01_058: [When any other error occurs, session_send_transfer shall fail and return a non-zero value.] */
+                            /* Codes_S_R_S_SESSION_01_058: [When any other error occurs, session_send_transfer shall fail and return a non-zero value.] */
                             result = SESSION_SEND_TRANSFER_ERROR;
                         }
                         else
@@ -1427,20 +1531,20 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
 
                                 if (available_frame_size >= payload_size)
                                 {
-                                    /* Codes_SRS_SESSION_01_055: [The encoding of the frame shall be done by calling connection_encode_frame and passing as arguments: the connection handle associated with the session, the transfer performative and the payload chunks passed to session_send_transfer.] */
+                                    /* Codes_S_R_S_SESSION_01_055: [The encoding of the frame shall be done by calling connection_encode_frame and passing as arguments: the connection handle associated with the session, the transfer performative and the payload chunks passed to session_send_transfer.] */
                                     if (connection_encode_frame(session_instance->endpoint, transfer_value, payloads, payload_count, on_send_complete, callback_context) != 0)
                                     {
-                                        /* Codes_SRS_SESSION_01_056: [If connection_encode_frame fails then session_send_transfer shall fail and return a non-zero value.] */
+                                        /* Codes_S_R_S_SESSION_01_056: [If connection_encode_frame fails then session_send_transfer shall fail and return a non-zero value.] */
                                         result = SESSION_SEND_TRANSFER_ERROR;
                                     }
                                     else
                                     {
-                                        /* Codes_SRS_SESSION_01_018: [is incremented after each successive transfer according to RFC-1982 [RFC1982] serial number arithmetic.] */
+                                        /* Codes_S_R_S_SESSION_01_018: [is incremented after each successive transfer according to RFC-1982 [RFC1982] serial number arithmetic.] */
                                         session_instance->next_outgoing_id++;
                                         session_instance->remote_incoming_window--;
                                         session_instance->outgoing_window--;
 
-                                        /* Codes_SRS_SESSION_01_053: [On success, session_send_transfer shall return 0.] */
+                                        /* Codes_S_R_S_SESSION_01_053: [On success, session_send_transfer shall return 0.] */
                                         result = SESSION_SEND_TRANSFER_OK;
                                     }
                                 }
@@ -1504,7 +1608,7 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
                                         }
 
                                         transfer_frame_payload_count = (uint32_t)(temp_current_payload_index - current_payload_index + 1);
-                                        transfer_frame_payloads = (PAYLOAD*)malloc(transfer_frame_payload_count * sizeof(PAYLOAD));
+                                        transfer_frame_payloads = (PAYLOAD*)calloc(1, (transfer_frame_payload_count * sizeof(PAYLOAD)));
                                         if (transfer_frame_payloads == NULL)
                                         {
                                             amqpvalue_destroy(multi_transfer_amqp_value);
@@ -1538,7 +1642,10 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
                                             transfer_frame_payload_count++;
                                         }
 
-                                        if (connection_encode_frame(session_instance->endpoint, multi_transfer_amqp_value, transfer_frame_payloads, transfer_frame_payload_count, on_send_complete, callback_context) != 0)
+                                        if (connection_encode_frame(session_instance->endpoint, multi_transfer_amqp_value, transfer_frame_payloads, transfer_frame_payload_count,
+                                            /* only fire the send complete calllback on the last frame of the multi frame transfer */
+                                            more ? NULL : on_send_complete,
+                                            callback_context) != 0)
                                         {
                                             free(transfer_frame_payloads);
                                             amqpvalue_destroy(multi_transfer_amqp_value);
@@ -1556,7 +1663,7 @@ SESSION_SEND_TRANSFER_RESULT session_send_transfer(LINK_ENDPOINT_HANDLE link_end
                                     }
                                     else
                                     {
-                                        /* Codes_SRS_SESSION_01_018: [is incremented after each successive transfer according to RFC-1982 [RFC1982] serial number arithmetic.] */
+                                        /* Codes_S_R_S_SESSION_01_018: [is incremented after each successive transfer according to RFC-1982 [RFC1982] serial number arithmetic.] */
                                         session_instance->next_outgoing_id++;
                                         session_instance->remote_incoming_window--;
                                         session_instance->outgoing_window--;

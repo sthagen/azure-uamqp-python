@@ -8,9 +8,6 @@ import os
 import sys
 import pytest
 
-root_path = os.path.realpath('.')
-sys.path.append(root_path)
-
 from uamqp import c_uamqp
 
 def test_create_source():
@@ -20,7 +17,7 @@ def test_create_source():
     assert isinstance(addr_value, c_uamqp.AMQPValue)
     assert addr_value.type == c_uamqp.AMQPType.CompositeType
     assert addr_value.size == 1
-    assert addr_value[0].value == "Address"
+    assert addr_value[0].value == b"Address"
 
 
 def test_create_target():
@@ -30,7 +27,7 @@ def test_create_target():
     assert isinstance(addr_value, c_uamqp.AMQPValue)
     assert addr_value.type == c_uamqp.AMQPType.CompositeType
     assert addr_value.size == 1
-    assert addr_value[0].value == "Address"
+    assert addr_value[0].value == b"Address"
     assert str(addr_value[0]) == "Address"
 
 
@@ -59,6 +56,23 @@ def test_delivery_rejected():
     assert rej_val[0].size == 2
     assert str(rej_val[0][0]) == 'Failed'
     assert str(rej_val[0][1]) == 'Test failure'
+
+    error = c_uamqp.dict_value()
+    error_key = c_uamqp.string_value(b"key123")
+    error_value = c_uamqp.string_value(b"value456")
+    error[error_key] = error_value
+    error_info = c_uamqp.create_fields(error)
+
+    rej_val = c_uamqp.Messaging.delivery_rejected(b'Failed', b'Test failure', error_info)
+    assert rej_val.type == c_uamqp.AMQPType.CompositeType
+    assert rej_val.size == 1
+    assert rej_val[0].type == c_uamqp.AMQPType.CompositeType
+    assert rej_val[0].size == 3
+    assert str(rej_val[0][0]) == 'Failed'
+    assert str(rej_val[0][1]) == 'Test failure'
+    error_info = rej_val[0][2]
+    assert error_info.type == c_uamqp.AMQPType.DictValue
+    assert error_info[error_key] == error_value
 
 
 def test_delivery_released():

@@ -1,19 +1,19 @@
 #!/bin/bash
 set -e
-
-export UAMQP_VERSION="0.1.0a2"
-export MACOSX_DEPLOYMENT_TARGET=10.6
+export MACOSX_DEPLOYMENT_TARGET=10.9
+export CMAKE_OSX_DEPLOYMENT_TARGET=10.9
+export CMAKE_OSX_ARCHITECTURES="x86_64"
+export UAMQP_USE_OPENSSL=True
+export UAMQP_REBUILD_PYX=True
 export UAMQP_SUPPRESS_LINK_FLAGS=True
-export CEF_CCFLAGS="-arch x86_64"
-export LDFLAGS="$(brew --prefix openssl@1.1)/lib/libssl.a $(brew --prefix openssl@1.1)/lib/libcrypto.a"
-export LDFLAGS="$LDFLAGS $(brew --prefix ossp-uuid)/lib/libuuid.a" 
-export CFLAGS="-I$(brew --prefix openssl@1.1)/include"
+export OPENSSL_ROOT_DIR="/tmp/openssl"
+export OPENSSL_INCLUDE_DIR="/tmp/openssl/include"
+export LDFLAGS="-mmacosx-version-min=10.9 -L/tmp/openssl/lib"
+export CFLAGS="-mmacosx-version-min=10.9 -I/tmp/openssl/include"
 
-# Make sure Cython and Wheel are available in all env
-python3.4 -m pip install cython==0.27.3 wheel
-python3.5 -m pip install cython==0.27.3 wheel
-python3.6 -m pip install cython==0.27.3 wheel
-
+python2.7 setup.py bdist_wheel
 python3.4 setup.py bdist_wheel
 python3.5 setup.py bdist_wheel
 python3.6 setup.py bdist_wheel
+python3.7 setup.py bdist_wheel
+python3.8 setup.py bdist_wheel
