@@ -647,13 +647,15 @@ class SendClient(AMQPClient):
         """
         # pylint: disable=protected-access
         self.message_handler.work()
+        self._connection.work()
+        if self._connection._state == c_uamqp.ConnectionState.DISCARDING:
+            raise errors.ConnectionClose(constants.ErrorCodes.InternalServerError)
         self._waiting_messages = 0
         self._pending_messages = self._filter_pending()
         if self._backoff and not self._waiting_messages:
             _logger.info("Client told to backoff - sleeping for %r seconds", self._backoff)
             self._connection.sleep(self._backoff)
             self._backoff = 0
-        self._connection.work()
         return True
 
     @property
